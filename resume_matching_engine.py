@@ -97,99 +97,176 @@ JD_RAW = {
     },
 }
 
-# ============================================================
-# STEP 1: Normalize skills — multi-word first, then single token
-# ============================================================
+# multi-word / hyphenated keys sorted longest first
 MULTI_WORD_KEYS = sorted(
     [k for k in SKILL_ALIASES if " " in k or "-" in k],
     key=lambda x: -len(x)
 )
 
-def normalize_skills(raw_string):
-    tokens = [t.strip().lower() for t in raw_string.split(",")]
-    result = []
+# ============================================================
+# PROMPT 1 — normalize_skills (matches Redrob AI output)
+# ============================================================
+def normalize_skills(skill_string, alias_dict):
+    """
+    Normalize a string of skills by splitting on commas, lowercasing each token,
+    checking multi-word phrases first, and then mapping to canonical skills using
+    the provided alias dictionary. Unknown tokens are discarded.
+    Args:
+        skill_string (str): The input string of skills.
+        alias_dict (dict): A dictionary mapping skill aliases to their canonical forms.
+    Returns:
+        list: A list of normalized skills.
+    """
+    # Split the input string into individual skills
+    skills = [skill.strip() for skill in skill_string.split(',')]
+
+    # Initialize an empty list to store the normalized skills
+    normalized_skills = []
     seen = set()
-    for token in tokens:
+
+    # Iterate over each skill
+    for skill in skills:
+        # Lowercase the skill
+        skill = skill.lower()
         matched = None
-        # Try multi-word / hyphenated phrases first
+
+        # Check if the skill is a multi-word phrase (longest first)
         for phrase in MULTI_WORD_KEYS:
-            if token == phrase:
-                matched = SKILL_ALIASES[phrase]
+            if skill == phrase.lower():
+                matched = alias_dict[phrase]
                 break
-        # Fallback: single token lookup
+
+        # If not multi-word, check if the skill is a single-word alias
         if matched is None:
-            matched = SKILL_ALIASES.get(token)
-        # Step 2: Deduplicate — only add if not seen before
+            matched = alias_dict.get(skill)
+
+        # Deduplicate — only add if not seen before
         if matched and matched not in seen:
-            result.append(matched)
+            normalized_skills.append(matched)
             seen.add(matched)
-    return result
+
+    # Return the list of normalized skills
+    return normalized_skills
+
 
 # ============================================================
-# STEP 3: Build shared vocabulary (alphabetically sorted)
+# PROMPT 2 — build_vocabulary, compute_document_frequency,
+#             compute_tf_idf (matches Redrob AI output)
 # ============================================================
-def build_vocabulary(normalized_resumes):
-    all_skills = set()
-    for skills in normalized_resumes.values():
-        all_skills.update(skills)
-    return sorted(all_skills)
+def build_vocabulary(resumes):
+    """
+    Build a shared vocabulary from all resumes.
+    Args:
+        resumes (list): A list of lists, where each inner list contains the skills in a resume.
+    Returns:
+        list: A sorted list of unique skills.
+    """
+    vocabulary = set()
+    for resume in resumes:
+        for skill in resume:
+            vocabulary.add(skill)
+    return sorted(list(vocabulary))
+
+
+def compute_document_frequency(resumes, vocabulary):
+    """
+    Compute the document frequency for each skill.
+    Args:
+        resumes (list): A list of lists, where each inner list contains the skills in a resume.
+        vocabulary (list): A sorted list of unique skills.
+    Returns:
+        dict: A dictionary where the keys are the skills and the values are their document frequencies.
+    """
+    document_frequency = {}
+    for skill in vocabulary:
+        document_frequency[skill] = sum(1 for resume in resumes if skill in resume)
+    return document_frequency
+
+
+def compute_tf_idf(resumes, vocabulary, document_frequency):
+    """
+    Compute the TF-IDF vectors for each resume.
+    Args:
+        resumes (list): A list of lists, where each inner list contains the skills in a resume.
+        vocabulary (list): A sorted list of unique skills.
+        document_frequency (dict): A dictionary where the keys are the skills and values are document frequencies.
+    Returns:
+        list: A list of dictionaries, where each dictionary represents the TF-IDF vector for a resume.
+    """
+    tf_idf_vectors = []
+    for resume in resumes:
+        unique_skills = len(set(resume))
+        tf_idf_vector = {}
+        for skill in vocabulary:
+            tf = 1 / unique_skills if skill in resume else 0
+            idf = math.log(10 / document_frequency[skill]) \
+                  if document_frequency[skill] > 0 else 0
+            tf_idf_vector[skill] = tf * idf
+        tf_idf_vectors.append(tf_idf_vector)
+    return tf_idf_vectors
+
 
 # ============================================================
-# STEP 4: Compute TF-IDF vectors for resumes
+# PROMPT 3 — build_binary_vectors, compute_cosine_similarity,
+#             get_top_candidates (matches Redrob AI output)
 # ============================================================
-def compute_tfidf(normalized_resumes, vocab):
-    vocab_index = {skill: i for i, skill in enumerate(vocab)}
-    N_DOCS = len(normalized_resumes)
+def build_binary_vectors(job_descriptions, vocabulary):
+    """
+    Build binary vectors for the job descriptions.
+    Args:
+        job_descriptions (list): A list of lists, where each inner list contains the skills in a job description.
+        vocabulary (list): A sorted list of unique skills.
+    Returns:
+        list: A list of binary vectors, where each binary vector represents a job description.
+    """
+    binary_vectors = []
+    for job_description in job_descriptions:
+        binary_vector = [1 if skill in job_description else 0 for skill in vocabulary]
+        binary_vectors.append(binary_vector)
+    return binary_vectors
 
-    # Document frequency: how many resumes contain each skill
-    df = {skill: 0 for skill in vocab}
-    for skills in normalized_resumes.values():
-        for s in set(skills):
-            df[s] += 1
 
-    # IDF = ln(N / df)  — no smoothing
-    idf = {skill: math.log(N_DOCS / df[skill]) for skill in vocab}
-
-    # TF-IDF vector per resume
-    vectors = {}
-    for name, skills in normalized_resumes.items():
-        N = len(skills)          # unique skills after dedup
-        vec = [0.0] * len(vocab)
-        for skill in skills:
-            tf = 1.0 / N         # TF = 1/N after deduplication
-            vec[vocab_index[skill]] = tf * idf[skill]
-        vectors[name] = vec
-
-    return vectors, idf, df
-
-# ============================================================
-# STEP 5: Build binary JD vectors over same vocabulary
-# ============================================================
-def build_jd_vector(skill_list, vocab_index):
-    vec = [0] * len(vocab_index)
-    for raw in skill_list:
-        r = raw.lower()
-        matched = None
-        for phrase in MULTI_WORD_KEYS:
-            if r == phrase:
-                matched = SKILL_ALIASES[phrase]
-                break
-        if matched is None:
-            matched = SKILL_ALIASES.get(r)
-        if matched and matched in vocab_index:
-            vec[vocab_index[matched]] = 1
-    return vec
-
-# ============================================================
-# STEP 6: Cosine similarity
-# ============================================================
-def cosine_similarity(a, b):
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
+def compute_cosine_similarity(tf_idf_vector, binary_vector):
+    """
+    Compute the cosine similarity between a TF-IDF vector and a binary vector.
+    Args:
+        tf_idf_vector (dict): A dictionary where the keys are the skills and the values are their TF-IDF scores.
+        binary_vector (list): A binary vector where presence of a skill is 1 and absence is 0.
+    Returns:
+        float: The cosine similarity between the TF-IDF vector and the binary vector.
+    """
+    tf_idf_scores = [tf_idf_vector[skill] for skill in tf_idf_vector]
+    dot_product = sum(a * b for a, b in zip(tf_idf_scores, binary_vector))
+    magnitude_tfidf = math.sqrt(sum(a ** 2 for a in tf_idf_scores))
+    magnitude_binary = math.sqrt(sum(a ** 2 for a in binary_vector))
+    if magnitude_tfidf == 0 or magnitude_binary == 0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return dot_product / (magnitude_tfidf * magnitude_binary)
+
+
+def get_top_candidates(candidate_names, tf_idf_vectors, binary_vectors):
+    """
+    Get the top 3 candidates per job description.
+    Args:
+        candidate_names (list): List of candidate names.
+        tf_idf_vectors (list): A list of TF-IDF vector dicts for each resume.
+        binary_vectors (list): A list of binary vectors for each job description.
+    Returns:
+        list: A list of lists, where each inner list contains the top 3 candidates for a job description.
+    """
+    top_candidates = []
+    for binary_vector in binary_vectors:
+        candidates = []
+        for j, tf_idf_vector in enumerate(tf_idf_vectors):
+            similarity = compute_cosine_similarity(tf_idf_vector, binary_vector)
+            candidates.append((j, similarity))
+        # Sort by descending similarity, alphabetical name for ties
+        candidates.sort(key=lambda x: (-x[1], candidate_names[x[0]]))
+        top_candidates.append(
+            [(candidate_names[c[0]], round(c[1], 2)) for c in candidates[:3]]
+        )
+    return top_candidates
+
 
 # ============================================================
 # MAIN — run the full pipeline
@@ -199,66 +276,80 @@ def main():
     print("   REDROB HACKATHON — RESUME MATCHING ENGINE")
     print("=" * 60)
 
-    # Step 1 & 2: Normalize + Deduplicate
+    # Step 1 & 2: Normalize + Deduplicate all resumes
     print("\n[STEP 1-2] Normalized & Deduplicated Skills")
     print("-" * 60)
-    normalized = {}
+    candidate_names = list(RESUMES.keys())
+    normalized_resumes = []
     for name, raw in RESUMES.items():
-        skills = normalize_skills(raw)
-        normalized[name] = skills
+        skills = normalize_skills(raw, SKILL_ALIASES)
+        normalized_resumes.append(skills)
         print(f"  {name}: {skills}")
 
-    # Step 3: Vocabulary
-    vocab = build_vocabulary(normalized)
-    vocab_index = {s: i for i, s in enumerate(vocab)}
-    print(f"\n[STEP 3] Vocabulary — {len(vocab)} terms (alphabetical)")
-    print(f"  {vocab}")
+    # Step 3: Build shared vocabulary
+    vocabulary = build_vocabulary(normalized_resumes)
+    print(f"\n[STEP 3] Vocabulary — {len(vocabulary)} terms (alphabetical)")
+    print(f"  {vocabulary}")
 
-    # Step 4: TF-IDF
-    tfidf_vectors, idf, df = compute_tfidf(normalized, vocab)
+    # Step 4: Compute document frequency and TF-IDF vectors
+    document_frequency = compute_document_frequency(normalized_resumes, vocabulary)
+    tf_idf_vectors = compute_tf_idf(normalized_resumes, vocabulary, document_frequency)
     print(f"\n[STEP 4] TF-IDF Vectors (non-zero only)")
     print("-" * 60)
-    for name, vec in tfidf_vectors.items():
-        nz = [(vocab[i], round(v, 4)) for i, v in enumerate(vec) if v > 0]
-        print(f"  {name}: {nz}")
+    for i, tf_idf_vector in enumerate(tf_idf_vectors):
+        nz = [(s, round(v, 4)) for s, v in tf_idf_vector.items() if v > 0]
+        print(f"  {candidate_names[i]}: {nz}")
 
-    # Step 5: JD Vectors
+    # Step 5: Build JD binary vectors
     print(f"\n[STEP 5] JD Binary Vectors")
     print("-" * 60)
-    jd_vectors = {}
+    jd_skill_lists = []
     for jd_id, jd_data in JD_RAW.items():
-        vec = build_jd_vector(jd_data["skills"], vocab_index)
-        jd_vectors[jd_id] = vec
-        present = [vocab[i] for i, v in enumerate(vec) if v == 1]
-        print(f"  {jd_id} — {jd_data['label']}: {present}")
+        # Normalize JD skills using same alias map
+        normalized_jd = []
+        for raw in jd_data["skills"]:
+            r = raw.lower()
+            matched = None
+            for phrase in MULTI_WORD_KEYS:
+                if r == phrase:
+                    matched = SKILL_ALIASES[phrase]
+                    break
+            if matched is None:
+                matched = SKILL_ALIASES.get(r)
+            if matched and matched in vocabulary:
+                normalized_jd.append(matched)
+        jd_skill_lists.append(normalized_jd)
+        print(f"  {jd_id} — {jd_data['label']}: {normalized_jd}")
 
-    # Step 6: Cosine similarity + Ranking
-    print(f"\n[STEP 6] Cosine Similarity Scores")
+    binary_vectors = build_binary_vectors(jd_skill_lists, vocabulary)
+
+    # Step 6: Cosine similarity and ranking
+    print(f"\n[STEP 6] Cosine Similarity & Top Candidates")
     print("-" * 60)
+    top_candidates = get_top_candidates(candidate_names, tf_idf_vectors, binary_vectors)
+
     print("\n" + "=" * 60)
     print("   FINAL RESULTS")
     print("=" * 60)
-
-    for jd_id, jd_vec in jd_vectors.items():
-        scores = []
-        for name, resume_vec in tfidf_vectors.items():
-            sim = cosine_similarity(resume_vec, jd_vec)
-            scores.append((name, sim))
-
-        # Sort: descending score, alphabetical name for ties
-        scores.sort(key=lambda x: (-x[1], x[0]))
-
-        label = JD_RAW[jd_id]["label"]
+    jd_labels = list(JD_RAW.items())
+    for i, candidates in enumerate(top_candidates):
+        jd_id = jd_labels[i][0]
+        label = jd_labels[i][1]["label"]
         jd_display = jd_id[:2] + "-" + jd_id[2:]
         print(f"\n{jd_display} — {label}")
-        top3 = scores[:3]
-        output = ", ".join(f"{n}({s:.2f})" for n, s in top3)
-        print(output)
+        print(", ".join(f"{name}({score:.2f})" for name, score in candidates))
 
-        # Show all scores for transparency
+        # Show all scores
         print("  [All scores]")
-        for name, score in scores:
+        all_scores = []
+        binary_vector = binary_vectors[i]
+        for j, tf_idf_vector in enumerate(tf_idf_vectors):
+            sim = compute_cosine_similarity(tf_idf_vector, binary_vector)
+            all_scores.append((candidate_names[j], sim))
+        all_scores.sort(key=lambda x: (-x[1], x[0]))
+        for name, score in all_scores:
             print(f"    {name}: {score:.6f}")
+
 
 if __name__ == "__main__":
     main()
