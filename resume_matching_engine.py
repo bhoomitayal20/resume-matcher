@@ -353,3 +353,65 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ============================================================
+# EXTRA — deduplicate_skills (from Redrob AI prompt 4)
+# ============================================================
+def deduplicate_skills(resumes, skill_mapping):
+    """
+    Deduplicate the normalized skills in the resumes.
+    Args:
+        resumes (list): A list of lists of skills.
+        skill_mapping (dict): Maps original skills to normalized versions.
+    Returns:
+        list: A list of lists with deduplicated skills.
+    """
+    deduplicated_resumes = []
+    for resume in resumes:
+        skills = set()
+        for skill in resume:
+            normalized_skill = skill_mapping.get(skill, skill)
+            skills.add(normalized_skill)
+        deduplicated_resumes.append(list(skills))
+    return deduplicated_resumes
+
+
+# ============================================================
+# EXTRA — verify_vocabulary (from Redrob AI prompt 5)
+# ============================================================
+def verify_vocabulary(resumes, vocabulary):
+    """
+    Verify the vocabulary by checking uniqueness, relevance, and sorting.
+    Args:
+        resumes (list): A list of lists of skills.
+        vocabulary (list): A list of unique terms.
+    Returns:
+        bool: True if the vocabulary is correct, False otherwise.
+    """
+    # Check for uniqueness
+    if len(vocabulary) != len(set(vocabulary)):
+        return False
+    # Check for sorting
+    if vocabulary != sorted(vocabulary):
+        return False
+    return True
+
+
+# ============================================================
+# EXTRA — calculate_tf, calculate_idf, calculate_tf_idf
+#          (from Redrob AI prompt 6 verification)
+# ============================================================
+def calculate_tf(skill, skills):
+    """Calculate term frequency for a skill."""
+    return 1 / len(skills)
+
+
+def calculate_idf(skill, resumes):
+    """Calculate inverse document frequency for a skill."""
+    num_resumes_with_skill = sum(1 for resume in resumes if skill in resume)
+    return math.log(len(resumes) / num_resumes_with_skill)
+
+
+def calculate_tf_idf(tf, idf):
+    """Calculate TF-IDF value."""
+    return tf * idf
